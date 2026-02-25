@@ -67,11 +67,58 @@ The queue system is per-cascade, so multiple conversations can process concurren
 
 # Usage
 
-1. Install the extension in Windsurf
-2. Configure settings:
-   - `windsurfapi.port` - HTTP server port (default: 47923)
-   - `windsurfapi.autoStart` - Auto-start server on Windsurf init (default: false)
-3. Start server manually via command palette: `Windsurf API: Start Server` (or enable autoStart)
+## Installation Scripts
+
+### 1) Prepare project dependencies and build output
+
+```bash
+./install.sh
+```
+
+What it does:
+- Checks required dependencies (`node`, `pnpm`, etc.)
+- Installs project dependencies
+- Generates protobuf artifacts when needed
+- Compiles TypeScript
+- Prints verification commands and remediation hints if runtime checks fail
+
+### 2) Package + install extension into Windsurf
+
+```bash
+scripts/install_extension.sh
+```
+
+What it does:
+- Packages the extension into a `.vsix`
+- Installs it with `windsurf --install-extension`
+- Verifies installation via CLI or filesystem fallback
+
+Important:
+- The script now checks that Windsurf is not running before install.
+- If you intentionally need to skip that check, use:
+
+```bash
+scripts/install_extension.sh --allow-running
+```
+
+### 3) Start server inside Windsurf
+
+In Windsurf Command Palette:
+- `Windsurf API: Start Server`
+
+### 4) Optional quick API verification
+
+```bash
+curl -fsS http://localhost:47923/models
+curl -fsS -X POST http://localhost:47923/prompt \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Hello from API"}'
+```
+
+## Settings
+
+- `windsurfapi.port` - HTTP server port (default: 47923)
+- `windsurfapi.autoStart` - Auto-start server on Windsurf init (default: false)
 
 ## API Endpoints
 
@@ -187,6 +234,26 @@ scripts/query.sh \
 ```
 
 Supported `--mode` values: `default`, `read-only`, `no-tool`, `explore`, `planning`, `auto`.
+
+Other useful examples:
+
+```bash
+# Reuse an existing conversation
+scripts/query.sh \
+  --cascade-id "<cascade-id>" \
+  --text "Continue from previous response"
+
+# Increase timeout for slower models
+scripts/query.sh \
+  --model "SWE-1.5" \
+  --timeout 420 \
+  --text "Review this architecture and suggest tradeoffs"
+
+# Print raw /response JSON payload too
+scripts/query.sh \
+  --raw \
+  --text "Give a one-line summary"
+```
 
 ## Test Scripts
 
