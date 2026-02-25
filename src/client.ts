@@ -6,7 +6,6 @@ import {
   TextOrScopeItemSchema,
   ImageDataSchema,
   MetadataSchema,
-  ModelOrAliasSchema,
   ClientModelConfig,
   ConversationalPlannerMode,
 } from "./gen/exa.codeium_common_pb_pb";
@@ -106,14 +105,40 @@ export class Client {
   ): Promise<void> {
     const metadata = this.createMetadata();
     const plannerMode = this.parsePlannerMode(mode);
-
-    let requestedModel = create(ModelOrAliasSchema, { alias: 5 });
+    let requestedModelDeprecated: ClientModelConfig["modelOrAlias"] | undefined;
+    let requestedModelUid = "";
+    let planModelUid = "";
 
     if (modelLabel) {
       const models = await this.getModels();
-      const selectedModel = models.find((m) => m.label === modelLabel);
-      if (selectedModel?.modelOrAlias) {
-        requestedModel = selectedModel.modelOrAlias;
+      const normalizedLabel = modelLabel.trim().toLowerCase();
+      const selectedModel =
+        models.find((m) => m.label.trim().toLowerCase() === normalizedLabel) ||
+        models.find((m) => m.label === modelLabel);
+
+      if (!selectedModel) {
+        const available = models.map((m) => m.label).join(", ");
+        throw new Error(
+          `Model '${modelLabel}' not found. Available models: ${available}`
+        );
+      }
+
+      requestedModelUid =
+        selectedModel.modelUid || selectedModel.modelOrAlias?.modelUid || "";
+      planModelUid = requestedModelUid;
+
+      const candidate = selectedModel.modelOrAlias;
+      if (
+        candidate &&
+        (candidate.modelUid.length > 0 || candidate.alias !== 0 || candidate.model !== 0)
+      ) {
+        requestedModelDeprecated = candidate;
+      }
+
+      if (!requestedModelUid && !requestedModelDeprecated) {
+        throw new Error(
+          `Model '${modelLabel}' could not be resolved into modelUid or model alias.`
+        );
       }
     }
 
@@ -129,7 +154,9 @@ export class Client {
             }),
           }),
         }),
-        requestedModelDeprecated: requestedModel,
+        requestedModelDeprecated,
+        requestedModelUid,
+        planModelUid,
       }),
       brainConfig: create(BrainConfigSchema, {
         enabled: true,
