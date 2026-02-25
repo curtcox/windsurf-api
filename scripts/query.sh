@@ -11,6 +11,7 @@ POLL_INTERVAL_SECONDS=2
 PRINT_RAW=0
 SUBMIT_FILE=""
 RESPONSE_FILE=""
+QUEUE_FILE=""
 
 usage() {
   cat <<'EOF'
@@ -109,7 +110,20 @@ http_get_json() {
 }
 
 cleanup() {
-  rm -f "${SUBMIT_FILE:-}" "${RESPONSE_FILE:-}"
+  rm -f "${SUBMIT_FILE:-}" "${RESPONSE_FILE:-}" "${QUEUE_FILE:-}"
+}
+
+poll_queue_status() {
+  local server_url="$1"
+  local message_id="$2"
+  local queue_file="$3"
+
+  local queue_url
+  queue_url="$server_url/queue/$(node -p "encodeURIComponent(process.argv[1])" "$message_id")"
+
+  local queue_code
+  queue_code="$(http_get_json "$queue_url" "$queue_file")" || return 99
+  printf '%s' "$queue_code"
 }
 
 main() {
@@ -240,9 +254,29 @@ main() {
     poll_target="$SERVER_URL/response?cascadeId=$(node -p "encodeURIComponent(process.argv[1])" "$cascade_id")"
   fi
 
+  # Capture baseline response so we can detect when a new answer arrives,
+  # including runtimes that never flip status back to IDLE.
+  local baseline_file baseline_code baseline_output_id baseline_step_index baseline_response
+  baseline_file="$(mktemp)"
+  baseline_output_id=""
+  baseline_step_index=""
+  baseline_response=""
+  baseline_code="$(http_get_json "$SERVER_URL/response?cascadeId=$(node -p "encodeURIComponent(process.argv[1])" "$cascade_id")" "$baseline_file" || true)"
+  if [[ -n "$baseline_code" && "$baseline_code" -ge 200 && "$baseline_code" -lt 300 ]]; then
+    baseline_output_id="$(json_extract "$baseline_file" "outputId")"
+    baseline_step_index="$(json_extract "$baseline_file" "stepIndex")"
+    baseline_response="$(json_extract "$baseline_file" "response")"
+  fi
+  rm -f "$baseline_file"
+
   local start_ts elapsed
   start_ts="$(date +%s)"
   RESPONSE_FILE="$(mktemp)"
+  local queue_status queue_error queue_position
+  QUEUE_FILE="$(mktemp)"
+
+  local last_queue_status=""
+  local last_output_id=""
 
   while true; do
     local poll_code
@@ -261,8 +295,37 @@ main() {
     ready="$(json_extract "$RESPONSE_FILE" "ready")"
     status="$(json_extract "$RESPONSE_FILE" "status")"
     response_text="$(json_extract "$RESPONSE_FILE" "response")"
+    local output_id step_index
+    output_id="$(json_extract "$RESPONSE_FILE" "outputId")"
+    step_index="$(json_extract "$RESPONSE_FILE" "stepIndex")"
 
-    if [[ "$ready" == "true" && -n "$response_text" ]]; then
+    queue_status=""
+    queue_error=""
+    queue_position=""
+    if [[ -n "$message_id" ]]; then
+      local queue_code
+      queue_code="$(poll_queue_status "$SERVER_URL" "$message_id" "$QUEUE_FILE")" || {
+        fail "Queue status polling failed for messageId=$message_id." "Check that the server is still running and retry."
+      }
+      if [[ "$queue_code" -ge 200 && "$queue_code" -lt 300 ]]; then
+        queue_status="$(json_extract "$QUEUE_FILE" "status")"
+        queue_error="$(json_extract "$QUEUE_FILE" "error")"
+        queue_position="$(json_extract "$QUEUE_FILE" "queuePosition")"
+      fi
+    fi
+
+    if [[ "$queue_status" == "error" ]]; then
+      [[ -n "$queue_error" ]] || queue_error="Unknown queue error"
+      fail "Prompt failed before completion: $queue_error" "Try again with a different model/mode, or inspect Windsurf logs for cascade errors."
+    fi
+
+    local has_response="false"
+    if [[ -n "$response_text" ]]; then
+      has_response="true"
+    fi
+
+    # Primary completion signal.
+    if [[ "$ready" == "true" && "$has_response" == "true" ]]; then
       printf '\n%s\n' "$response_text"
       if [[ "$PRINT_RAW" -eq 1 ]]; then
         printf '\n[RAW RESPONSE]\n'
@@ -272,16 +335,64 @@ main() {
       return 0
     fi
 
+    # Fallback completion signal for runtimes that keep status non-idle.
+    # Return when we observe a new response output after submission.
+    if [[ "$has_response" == "true" ]]; then
+      local output_changed="false"
+      local step_changed="false"
+
+      if [[ -n "$output_id" && "$output_id" != "$baseline_output_id" ]]; then
+        output_changed="true"
+      fi
+      if [[ -n "$step_index" && "$step_index" != "$baseline_step_index" ]]; then
+        step_changed="true"
+      fi
+      if [[ -z "$baseline_output_id" && -z "$baseline_response" ]]; then
+        output_changed="true"
+      fi
+
+      if [[ "$output_changed" == "true" || "$step_changed" == "true" ]]; then
+        warn "Returning latest response even though ready=$ready (runtime did not report idle)."
+        printf '\n%s\n' "$response_text"
+        if [[ "$PRINT_RAW" -eq 1 ]]; then
+          printf '\n[RAW RESPONSE]\n'
+          cat "$RESPONSE_FILE"
+          printf '\n'
+        fi
+        return 0
+      fi
+    fi
+
     elapsed="$(( $(date +%s) - start_ts ))"
     if awk "BEGIN { exit !($elapsed >= $TIMEOUT_SECONDS) }"; then
       warn "Last poll payload:"
       cat "$RESPONSE_FILE" >&2
+      printf '\n' >&2
+      if [[ -n "$message_id" ]]; then
+        warn "Last queue payload:"
+        cat "$QUEUE_FILE" >&2
+        printf '\n' >&2
+      fi
       fail \
         "Timed out after ${TIMEOUT_SECONDS}s waiting for a final response." \
         "Retry with a longer timeout (--timeout), or check $SERVER_URL/status?cascadeId=$cascade_id and $SERVER_URL/queue/${message_id:-<message-id>}."
     fi
 
-    log "Waiting for final response (elapsed=${elapsed}s, status=${status:-unknown}, ready=${ready:-false})"
+    if [[ -n "$queue_status" ]]; then
+      if [[ "$queue_status" != "$last_queue_status" ]]; then
+        log "Queue status for messageId=$message_id: ${queue_status}${queue_position:+ (position=$queue_position)}"
+        last_queue_status="$queue_status"
+      fi
+      log "Waiting for final response (elapsed=${elapsed}s, status=${status:-unknown}, ready=${ready:-false}, queue=${queue_status})"
+    else
+      log "Waiting for final response (elapsed=${elapsed}s, status=${status:-unknown}, ready=${ready:-false})"
+    fi
+
+    if [[ -n "$output_id" && "$output_id" != "$last_output_id" ]]; then
+      log "Observed outputId change: $output_id"
+      last_output_id="$output_id"
+    fi
+
     sleep "$POLL_INTERVAL_SECONDS"
   done
 }
