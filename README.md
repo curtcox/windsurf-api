@@ -101,6 +101,11 @@ curl -X POST http://localhost:47923/prompt \
 curl -X POST http://localhost:47923/prompt \
   -H "Content-Type: application/json" \
   -d '{"text": "Use GPT-5", "model": "GPT-5 (low reasoning)"}'
+
+# With mode + model selection
+curl -X POST http://localhost:47923/prompt \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Plan first, then implement","mode":"planning","model":"Claude Sonnet 4.5 (promo)"}'
 ```
 
 Response:
@@ -152,6 +157,25 @@ Check if a cascade is idle or busy.
 ```bash
 curl http://localhost:47923/status?cascadeId=cascade-id
 ```
+
+## CLI Query Script
+
+Submit a prompt and wait for the final response:
+
+```bash
+scripts/query.sh --text "Summarize this repository"
+```
+
+Use mode/model flags:
+
+```bash
+scripts/query.sh \
+  --mode planning \
+  --model "Claude Sonnet 4.5 (promo)" \
+  --text "Create a release checklist for this project"
+```
+
+Supported `--mode` values: `default`, `read-only`, `no-tool`, `explore`, `planning`, `auto`.
 
 ## Test Scripts
 

@@ -10,6 +10,7 @@ export interface QueuedMessage {
   text: string;
   images?: Array<{ base64: string; mime?: string }>;
   model?: string;
+  mode?: string;
   status: MessageStatus;
   timestamp: Date;
   error?: string;
@@ -27,7 +28,8 @@ export class MessageQueue {
     cascadeId: string,
     text: string,
     images?: Array<{ base64: string; mime?: string }>,
-    model?: string
+    model?: string,
+    mode?: string
   ): Promise<{ status: MessageStatus; messageId: string }> {
     const message: QueuedMessage = {
       id: randomUUID(),
@@ -35,6 +37,7 @@ export class MessageQueue {
       text,
       images,
       model,
+      mode,
       status: "queued",
       timestamp: new Date(),
     };
@@ -44,7 +47,7 @@ export class MessageQueue {
       const status = await this.client.getCascadeStatus(cascadeId);
 
       if (status === CascadeRunStatus.IDLE) {
-        await this.client.sendMessageDirect(text, cascadeId, images, model);
+        await this.client.sendMessageDirect(text, cascadeId, images, model, mode);
         message.status = "sent";
         console.log(`Message ${message.id} sent immediately to cascade ${cascadeId}`);
         return { status: "sent", messageId: message.id };
@@ -127,7 +130,8 @@ export class MessageQueue {
               message.text,
               cascadeId,
               message.images,
-              message.model
+              message.model,
+              message.mode
             );
             message.status = "sent";
             console.log(`Message ${message.id} sent to cascade ${cascadeId}`);

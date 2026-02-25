@@ -6,6 +6,7 @@ interface PromptRequest {
   text: string;
   images?: Array<{ base64: string; mime?: string }>;
   model?: string;
+  mode?: string;
   cascadeId?: string | null;
 }
 
@@ -181,7 +182,7 @@ export class HttpServer {
     });
 
     this.server.post<{ Body: PromptRequest }>("/prompt", async (request, reply) => {
-      const { text, images, model, cascadeId } = request.body;
+      const { text, images, model, mode, cascadeId } = request.body;
 
       if (!text) {
         return reply.status(400).send({ error: "text is required" });
@@ -198,7 +199,8 @@ export class HttpServer {
           targetCascadeId,
           text,
           images,
-          model
+          model,
+          mode
         );
 
         const queuePosition =

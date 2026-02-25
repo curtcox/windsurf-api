@@ -8,6 +8,7 @@ import {
   MetadataSchema,
   ModelOrAliasSchema,
   ClientModelConfig,
+  ConversationalPlannerMode,
 } from "./gen/exa.codeium_common_pb_pb";
 import {
   CascadeConfigSchema,
@@ -64,13 +65,47 @@ export class Client {
     });
   }
 
+  private parsePlannerMode(mode?: string): ConversationalPlannerMode {
+    if (!mode) {
+      return ConversationalPlannerMode.DEFAULT;
+    }
+
+    const normalized = mode.trim().toLowerCase();
+
+    const mapping: Record<string, ConversationalPlannerMode> = {
+      default: ConversationalPlannerMode.DEFAULT,
+      write: ConversationalPlannerMode.DEFAULT,
+      "read-only": ConversationalPlannerMode.READ_ONLY,
+      readonly: ConversationalPlannerMode.READ_ONLY,
+      read: ConversationalPlannerMode.READ_ONLY,
+      "no-tool": ConversationalPlannerMode.NO_TOOL,
+      notool: ConversationalPlannerMode.NO_TOOL,
+      chat: ConversationalPlannerMode.NO_TOOL,
+      explore: ConversationalPlannerMode.EXPLORE,
+      planning: ConversationalPlannerMode.PLANNING,
+      plan: ConversationalPlannerMode.PLANNING,
+      auto: ConversationalPlannerMode.AUTO,
+    };
+
+    const plannerMode = mapping[normalized];
+    if (plannerMode === undefined) {
+      throw new Error(
+        `Unsupported mode '${mode}'. Supported values: default, read-only, no-tool, explore, planning, auto`
+      );
+    }
+
+    return plannerMode;
+  }
+
   async sendMessageDirect(
     text: string,
     cascadeId: string,
     images?: Array<{ base64: string; mime?: string }>,
-    modelLabel?: string
+    modelLabel?: string,
+    mode?: string
   ): Promise<void> {
     const metadata = this.createMetadata();
+    const plannerMode = this.parsePlannerMode(mode);
 
     let requestedModel = create(ModelOrAliasSchema, { alias: 5 });
 
@@ -85,7 +120,7 @@ export class Client {
     const cascadeConfig = create(CascadeConfigSchema, {
       plannerConfig: create(CascadePlannerConfigSchema, {
         conversational: create(CascadeConversationalPlannerConfigSchema, {
-          plannerMode: 1,
+          plannerMode,
         }),
         toolConfig: create(CascadeToolConfigSchema, {
           runCommand: create(RunCommandToolConfigSchema, {
