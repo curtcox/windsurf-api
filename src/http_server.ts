@@ -76,27 +76,34 @@ export class HttpServer {
     this.server.get("/trajectories", async (request, reply) => {
       try {
         const trajectories = await this.client.getTrajectories();
-        const mapped = Object.entries(trajectories).map(([cascadeId, summary]) => ({
-          cascadeId,
-          name: summary.renamedTitle || summary.summary,
-          summary: summary.summary,
-          stepCount: summary.stepCount,
-          status: summary.status,
-          errored: summary.errored,
-          createdTime: summary.createdTime
-            ? new Date(
-                Number(summary.createdTime.seconds) * 1000 +
-                  summary.createdTime.nanos / 1000000
-              ).toISOString()
-            : undefined,
-          lastModifiedTime: summary.lastModifiedTime
-            ? new Date(
-                Number(summary.lastModifiedTime.seconds) * 1000 +
-                  summary.lastModifiedTime.nanos / 1000000
-              ).toISOString()
-            : undefined,
-          isClaudeCode: summary.isClaudeCode,
-        }));
+        const mapped = Object.entries(trajectories).map(([cascadeId, summary]) => {
+          // Backward compatibility: some proto versions expose isClaudeCode, newer ones do not.
+          const summaryWithOptionalClaude = summary as typeof summary & {
+            isClaudeCode?: boolean;
+          };
+
+          return {
+            cascadeId,
+            name: summary.renamedTitle || summary.summary,
+            summary: summary.summary,
+            stepCount: summary.stepCount,
+            status: summary.status,
+            errored: summary.errored,
+            createdTime: summary.createdTime
+              ? new Date(
+                  Number(summary.createdTime.seconds) * 1000 +
+                    summary.createdTime.nanos / 1000000
+                ).toISOString()
+              : undefined,
+            lastModifiedTime: summary.lastModifiedTime
+              ? new Date(
+                  Number(summary.lastModifiedTime.seconds) * 1000 +
+                    summary.lastModifiedTime.nanos / 1000000
+                ).toISOString()
+              : undefined,
+            isClaudeCode: summaryWithOptionalClaude.isClaudeCode,
+          };
+        });
         return mapped;
       } catch (error) {
         return reply.status(500).send({

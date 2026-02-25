@@ -94,7 +94,7 @@ export class Client {
             }),
           }),
         }),
-        requestedModel,
+        requestedModelDeprecated: requestedModel,
       }),
       brainConfig: create(BrainConfigSchema, {
         enabled: true,

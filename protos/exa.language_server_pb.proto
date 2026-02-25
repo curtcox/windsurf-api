@@ -1405,12 +1405,12 @@ message BranchCascadeAndGenerateCodeMapRequest {  string cascade_id = 1;
   string mode = 5;
 }
 
-message Success {  string code_map_json = 1;
+message BranchCascadeAndGenerateCodeMapSuccess {  string code_map_json = 1;
   string new_cascade_id = 2;
 }
 
 message BranchCascadeAndGenerateCodeMapResponse {  string updates_json = 1;
-  exa.language_server_pb.Success success = 2;
+  exa.language_server_pb.BranchCascadeAndGenerateCodeMapSuccess success = 2;
   string status = 3;
 }
 
@@ -1689,4 +1689,3 @@ service LanguageServerService {
   rpc OnEdit(exa.language_server_pb.OnEditRequest) returns (exa.language_server_pb.OnEditResponse);
   rpc GetSystemPromptAndTools(exa.language_server_pb.GetSystemPromptAndToolsRequest) returns (exa.language_server_pb.GetSystemPromptAndToolsResponse);
 }
-
