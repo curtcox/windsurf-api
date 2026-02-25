@@ -9,6 +9,11 @@ interface PromptRequest {
   cascadeId?: string | null;
 }
 
+interface ResponseQuery {
+  cascadeId?: string;
+  messageId?: string;
+}
+
 export class HttpServer {
   private server: FastifyInstance | null = null;
   private port: number;
@@ -34,6 +39,28 @@ export class HttpServer {
       if (request.method === "OPTIONS") {
         reply.status(200).send();
       }
+    });
+
+    this.server.get("/", async (request, reply) => {
+      return {
+        name: "windsurf-api",
+        status: "ok",
+        endpoints: {
+          health: "GET /health",
+          models: "GET /models",
+          trajectories: "GET /trajectories",
+          cascadeStatus: "GET /status?cascadeId=<cascade-id>",
+          sendPrompt: "POST /prompt",
+          response: "GET /response?cascadeId=<cascade-id> (or ?messageId=<message-id>)",
+          queue: "GET /queue",
+          queueByMessage: "GET /queue/:messageId",
+        },
+        promptFlow: [
+          "1) POST /prompt",
+          "2) Poll GET /response?cascadeId=<cascade-id> until ready=true",
+          "3) Read response field for final assistant answer",
+        ],
+      };
     });
 
     this.server.get("/health", async (request, reply) => {
@@ -64,7 +91,48 @@ export class HttpServer {
 
         try {
           const status = await this.client.getCascadeStatus(cascadeId);
-          return { cascadeId, status };
+          return {
+            cascadeId,
+            status,
+            statusUrl: `/status?cascadeId=${encodeURIComponent(cascadeId)}`,
+            responseUrl: `/response?cascadeId=${encodeURIComponent(cascadeId)}`,
+          };
+        } catch (error) {
+          return reply.status(500).send({
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    );
+
+    this.server.get<{ Querystring: ResponseQuery }>(
+      "/response",
+      async (request, reply) => {
+        const { cascadeId: queryCascadeId, messageId } = request.query;
+        let cascadeId = queryCascadeId;
+
+        if (!cascadeId && messageId) {
+          const message = this.queue.getMessage(messageId);
+          if (!message) {
+            return reply.status(404).send({
+              error: "Message not found. Provide cascadeId directly or use a known messageId.",
+            });
+          }
+          cascadeId = message.cascadeId;
+        }
+
+        if (!cascadeId) {
+          return reply.status(400).send({
+            error: "Either cascadeId or messageId query parameter is required",
+          });
+        }
+
+        try {
+          const response = await this.client.getCascadeResponse(cascadeId);
+          return {
+            cascadeId,
+            ...response,
+          };
         } catch (error) {
           return reply.status(500).send({
             error: error instanceof Error ? error.message : String(error),
@@ -143,6 +211,9 @@ export class HttpServer {
           messageId: result.messageId,
           cascadeId: targetCascadeId,
           queuePosition,
+          statusUrl: `/status?cascadeId=${encodeURIComponent(targetCascadeId)}`,
+          responseUrl: `/response?cascadeId=${encodeURIComponent(targetCascadeId)}`,
+          messageStatusUrl: `/queue/${encodeURIComponent(result.messageId)}`,
         };
       } catch (error) {
         return reply.status(500).send({
@@ -193,6 +264,7 @@ export class HttpServer {
           timestamp: message.timestamp.toISOString(),
           queuePosition: queuePosition > 0 ? queuePosition : undefined,
           error: message.error,
+          responseUrl: `/response?cascadeId=${encodeURIComponent(message.cascadeId)}`,
         };
       }
     );

@@ -7,6 +7,10 @@ LOG_FILE="${TMPDIR:-/tmp}/windsurf-api-install-extension.log"
 PACKAGE_SCRIPT=""
 EXTENSION_NAME=""
 EXTENSION_PUBLISHER=""
+EXTENSION_VERSION=""
+EXPECTED_NAME_LOWER=""
+EXPECTED_IDS=()
+VERIFICATION_METHOD=""
 
 log() {
   printf '[INFO] %s\n' "$1"
@@ -41,6 +45,10 @@ command_exists() {
   command -v "$command_name" >/dev/null 2>&1
 }
 
+to_lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 get_package_field() {
   local field="$1"
   node -e '
@@ -55,6 +63,11 @@ if (typeof value === "string") process.stdout.write(value);
 has_vsce_not_found_error() {
   local log_file="$1"
   grep -Eq 'vsce: command not found|Command "vsce" not found|sh: vsce:' "$log_file"
+}
+
+has_reinstall_requires_restart_error() {
+  local log_file="$1"
+  grep -Eq 'restart Windsurf before reinstalling|Please restart Windsurf before reinstalling' "$log_file"
 }
 
 get_package_script() {
@@ -78,12 +91,44 @@ ensure_package_script_exists() {
 ensure_extension_metadata() {
   EXTENSION_NAME="$(get_package_field "name")"
   EXTENSION_PUBLISHER="$(get_package_field "publisher")"
+  EXTENSION_VERSION="$(get_package_field "version")"
 
   if [[ -z "$EXTENSION_NAME" ]]; then
     fail_with_solution \
       "package.json is missing extension name." \
       "Add a valid name field to package.json and retry."
   fi
+
+  EXPECTED_NAME_LOWER="$(to_lower "$EXTENSION_NAME")"
+  build_expected_extension_ids
+}
+
+build_expected_extension_ids() {
+  EXPECTED_IDS=()
+
+  if [[ -n "$EXTENSION_PUBLISHER" ]]; then
+    EXPECTED_IDS+=("$(to_lower "$EXTENSION_PUBLISHER.$EXTENSION_NAME")")
+  fi
+
+  # Windsurf CLI commonly shows unpacked extensions without a publisher.
+  EXPECTED_IDS+=("$(to_lower "undefined_publisher.$EXTENSION_NAME")")
+  EXPECTED_IDS+=("$EXPECTED_NAME_LOWER")
+}
+
+expected_id_summary() {
+  local IFS=', '
+  printf '%s' "${EXPECTED_IDS[*]}"
+}
+
+ensure_windsurf_cli_usable() {
+  log "Checking Windsurf CLI availability."
+  if windsurf --version >>"$LOG_FILE" 2>&1; then
+    return
+  fi
+
+  fail_with_solution \
+    "Windsurf CLI command exists but failed to run." \
+    "Run \`windsurf --version\` manually, fix the CLI/runtime issue, then re-run this script."
 }
 
 pnpm_dlx_available() {
@@ -106,7 +151,15 @@ print_log_tail() {
 }
 
 find_latest_vsix() {
-  local latest
+  local expected latest
+  if [[ -n "$EXTENSION_VERSION" ]]; then
+    expected="$REPO_ROOT/${EXTENSION_NAME}-${EXTENSION_VERSION}.vsix"
+    if [[ -f "$expected" ]]; then
+      printf '%s' "$expected"
+      return
+    fi
+  fi
+
   latest="$(ls -t "$REPO_ROOT"/*.vsix 2>/dev/null | head -1 || true)"
   printf '%s' "$latest"
 }
@@ -116,6 +169,11 @@ install_extension_with_windsurf() {
   log "Installing extension via windsurf --install-extension."
 
   if ! windsurf --install-extension "$vsix_path" --force >>"$LOG_FILE" 2>&1; then
+    if has_reinstall_requires_restart_error "$LOG_FILE"; then
+      warn "Windsurf reported a restart is required before reinstalling; continuing with installed-extension verification."
+      return 0
+    fi
+
     print_log_tail
     fail_with_solution \
       "Failed to install VSIX through windsurf CLI." \
@@ -123,54 +181,114 @@ install_extension_with_windsurf() {
   fi
 }
 
-verify_extension_installed() {
-  local installed_raw normalized line base
-  local expected_name expected_full found
+matches_extension_list_id() {
+  local base="$1"
+  local expected_id
 
-  expected_name="$(printf '%s' "$EXTENSION_NAME" | tr '[:upper:]' '[:lower:]')"
-  expected_full=""
-  if [[ -n "$EXTENSION_PUBLISHER" ]]; then
-    expected_full="$(printf '%s.%s' "$EXTENSION_PUBLISHER" "$EXTENSION_NAME" | tr '[:upper:]' '[:lower:]')"
+  for expected_id in "${EXPECTED_IDS[@]}"; do
+    if [[ "$base" == "$expected_id" ]]; then
+      return 0
+    fi
+  done
+
+  if [[ "$base" == *".$EXPECTED_NAME_LOWER" ]]; then
+    return 0
   fi
 
-  if ! installed_raw="$(windsurf --list-extensions 2>>"$LOG_FILE")"; then
-    print_log_tail
-    fail_with_solution \
-      "Failed to list installed Windsurf extensions." \
-      'Run `windsurf --list-extensions` manually and confirm the extension is present.'
+  return 1
+}
+
+matches_extension_folder_name() {
+  local folder="$1"
+  local expected_id
+
+  for expected_id in "${EXPECTED_IDS[@]}"; do
+    if [[ "$folder" == "$expected_id" || "$folder" == "$expected_id"-* ]]; then
+      return 0
+    fi
+  done
+
+  if [[ "$folder" == *".$EXPECTED_NAME_LOWER" || "$folder" == *".$EXPECTED_NAME_LOWER"-* ]]; then
+    return 0
   fi
+
+  return 1
+}
+
+verify_extension_in_list_output() {
+  local installed_raw="$1"
+  local normalized line base
 
   normalized="$(printf '%s\n' "$installed_raw" | awk '/^[A-Za-z0-9._-]+(@[A-Za-z0-9._+-]+)?$/ {print tolower($0)}')"
-  found=""
-
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     base="${line%@*}"
 
-    if [[ "$base" == "$expected_name" ]]; then
-      found="$base"
-      break
-    fi
-
-    if [[ -n "$expected_full" && "$base" == "$expected_full" ]]; then
-      found="$base"
-      break
-    fi
-
-    if [[ "$base" == *".$expected_name" ]]; then
-      found="$base"
-      break
+    if matches_extension_list_id "$base"; then
+      VERIFICATION_METHOD="windsurf --list-extensions"
+      log "Verified extension installation via windsurf CLI: $base"
+      return 0
     fi
   done <<< "$normalized"
 
-  if [[ -z "$found" ]]; then
-    print_log_tail
-    fail_with_solution \
-      'Extension does not appear in `windsurf --list-extensions` after install.' \
-      'Check `windsurf --list-extensions` output manually and reinstall the VSIX if needed.'
+  return 1
+}
+
+verify_extension_on_disk() {
+  local extensions_dir="${WINDSURF_EXTENSIONS_DIR:-$HOME/.windsurf/extensions}"
+  local dir base lower
+
+  if [[ ! -d "$extensions_dir" ]]; then
+    warn "Windsurf extensions directory was not found: $extensions_dir"
+    return 1
   fi
 
-  log "Verified extension installation: $found"
+  while IFS= read -r dir; do
+    base="$(basename "$dir")"
+    lower="$(to_lower "$base")"
+    if matches_extension_folder_name "$lower"; then
+      VERIFICATION_METHOD="filesystem ($extensions_dir)"
+      log "Verified extension installation from filesystem: $dir"
+      return 0
+    fi
+  done < <(find "$extensions_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+
+  warn "No matching extension folder found in $extensions_dir"
+  return 1
+}
+
+verify_extension_installed() {
+  local installed_raw=""
+  local list_failed=0
+
+  if installed_raw="$(windsurf --list-extensions 2>>"$LOG_FILE")"; then
+    if verify_extension_in_list_output "$installed_raw"; then
+      return
+    fi
+
+    warn "Extension not found in \`windsurf --list-extensions\` output. Falling back to filesystem verification."
+  else
+    list_failed=1
+    warn "\`windsurf --list-extensions\` failed. Falling back to filesystem verification."
+    print_log_tail
+  fi
+
+  if verify_extension_on_disk; then
+    if [[ $list_failed -eq 1 ]]; then
+      warn "Windsurf CLI listing failed, but extension is installed on disk."
+    fi
+    return
+  fi
+
+  if [[ $list_failed -eq 1 ]]; then
+    fail_with_solution \
+      "Could not verify extension installation because \`windsurf --list-extensions\` failed and no matching extension folder was found." \
+      "Run \`windsurf --list-extensions\` manually, then check \`$HOME/.windsurf/extensions\` for one of: $(expected_id_summary)"
+  fi
+
+  fail_with_solution \
+    "Extension does not appear to be installed after running \`windsurf --install-extension\`." \
+    "Check \`windsurf --list-extensions\`, then reinstall the VSIX if needed."
 }
 
 package_with_dlx_fallback() {
@@ -189,8 +307,6 @@ package_with_dlx_fallback() {
 }
 
 package_extension() {
-  : >"$LOG_FILE"
-
   if [[ "$PACKAGE_SCRIPT" == *"vsce"* ]] && ! vsce_available; then
     warn "scripts.package uses vsce but vsce is not currently available."
     if package_with_dlx_fallback; then
@@ -227,12 +343,17 @@ package_extension() {
 
 print_manual_steps() {
   local vsix_path="$1"
+  local verification_summary="$VERIFICATION_METHOD"
+
+  if [[ -z "$verification_summary" ]]; then
+    verification_summary="unknown method"
+  fi
 
   cat <<EOF
 Automated steps completed:
 - Built extension package: $vsix_path
 - Installed extension via windsurf CLI.
-- Verified extension appears in windsurf extension list.
+- Verified extension installation using: $verification_summary.
 
 These steps cannot be fully automated from this shell:
 1. If Windsurf is already open, reload Windsurf to ensure command registration is refreshed.
@@ -245,6 +366,8 @@ EOF
 }
 
 main() {
+  : >"$LOG_FILE"
+
   require_command node "running package tools"
   require_command pnpm "packaging the extension"
   require_command windsurf "installing and verifying the extension"
@@ -259,6 +382,7 @@ main() {
 
   ensure_package_script_exists
   ensure_extension_metadata
+  ensure_windsurf_cli_usable
   package_extension
 
   local vsix_path

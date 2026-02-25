@@ -21,6 +21,7 @@ import {
   DynamicBrainUpdateConfigSchema,
   CascadeTrajectorySummary,
   CascadeRunStatus,
+  CortexTrajectoryStep,
 } from "./gen/exa.cortex_pb_pb";
 import { ChatParams } from "./types";
 
@@ -32,7 +33,6 @@ async function detectMimeType(base64: string): Promise<string> {
 }
 
 export class Client {
-  private cascadeId: string | null = null;
   private client: ReturnType<typeof createClient<typeof LanguageServerService>>;
 
   constructor(private chatParams: ChatParams) {
@@ -144,12 +144,72 @@ export class Client {
     return response.cascadeId;
   }
 
-  async getCascadeStatus(cascadeId: string): Promise<CascadeRunStatus> {
-    const response = await this.client.getCascadeTrajectory({
+  private async getCascadeTrajectoryRaw(cascadeId: string) {
+    return await this.client.getCascadeTrajectory({
       cascadeId,
     });
+  }
+
+  async getCascadeStatus(cascadeId: string): Promise<CascadeRunStatus> {
+    const response = await this.getCascadeTrajectoryRaw(cascadeId);
 
     return response.status;
+  }
+
+  private extractLatestPlannerResponse(
+    steps: CortexTrajectoryStep[]
+  ): {
+    stepIndex: number;
+    response: string | null;
+    rawResponse: string | null;
+    messageId: string | null;
+    outputId: string | null;
+  } | null {
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const planner = steps[i].plannerResponse;
+      if (!planner) {
+        continue;
+      }
+
+      const responseText = planner.modifiedResponse || planner.response;
+      if (!responseText) {
+        continue;
+      }
+
+      return {
+        stepIndex: i,
+        response: responseText,
+        rawResponse: planner.response || null,
+        messageId: planner.messageId || null,
+        outputId: planner.outputId || null,
+      };
+    }
+
+    return null;
+  }
+
+  async getCascadeResponse(cascadeId: string): Promise<{
+    status: CascadeRunStatus;
+    ready: boolean;
+    stepIndex: number | null;
+    response: string | null;
+    rawResponse: string | null;
+    messageId: string | null;
+    outputId: string | null;
+  }> {
+    const trajectory = await this.getCascadeTrajectoryRaw(cascadeId);
+    const steps = trajectory.trajectory?.steps || [];
+    const latest = this.extractLatestPlannerResponse(steps);
+
+    return {
+      status: trajectory.status,
+      ready: trajectory.status === CascadeRunStatus.IDLE && latest !== null,
+      stepIndex: latest?.stepIndex ?? null,
+      response: latest?.response ?? null,
+      rawResponse: latest?.rawResponse ?? null,
+      messageId: latest?.messageId ?? null,
+      outputId: latest?.outputId ?? null,
+    };
   }
 
   async waitForCascadeIdle(
@@ -177,11 +237,49 @@ export class Client {
   async getModels(): Promise<ClientModelConfig[]> {
     const metadata = this.createMetadata();
 
-    const response = await this.client.getCascadeModelConfigs({
-      metadata,
-    });
+    const isUnimplementedError = (error: unknown): boolean => {
+      const message = error instanceof Error ? error.message : String(error);
+      return /unimplemented|not implemented/i.test(message);
+    };
 
-    return response.clientModelConfigs;
+    const attempts: Array<() => Promise<ClientModelConfig[]>> = [
+      async () => {
+        const response = await this.client.getCascadeModelConfigs({ metadata });
+        return response.clientModelConfigs;
+      },
+      async () => {
+        const response = await this.client.getCommandModelConfigs({ metadata });
+        return response.clientModelConfigs;
+      },
+      async () => {
+        const response = await this.client.getUserStatus({ metadata });
+        return response.userStatus?.cascadeModelConfigData?.clientModelConfigs || [];
+      },
+    ];
+
+    let lastError: unknown = null;
+    let hadSuccessfulCall = false;
+
+    for (const attempt of attempts) {
+      try {
+        const models = await attempt();
+        hadSuccessfulCall = true;
+        if (models.length > 0) {
+          return models;
+        }
+      } catch (error) {
+        lastError = error;
+        if (!isUnimplementedError(error)) {
+          throw error;
+        }
+      }
+    }
+
+    if (!hadSuccessfulCall && lastError) {
+      throw lastError;
+    }
+
+    return [];
   }
 
   async getTrajectories(): Promise<{

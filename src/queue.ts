@@ -17,6 +17,7 @@ export interface QueuedMessage {
 
 export class MessageQueue {
   private queues: Map<string, QueuedMessage[]> = new Map();
+  private messages: Map<string, QueuedMessage> = new Map();
   private processing: Set<string> = new Set();
   private workerInterval: NodeJS.Timeout | null = null;
 
@@ -37,6 +38,7 @@ export class MessageQueue {
       status: "queued",
       timestamp: new Date(),
     };
+    this.messages.set(message.id, message);
 
     try {
       const status = await this.client.getCascadeStatus(cascadeId);
@@ -73,11 +75,7 @@ export class MessageQueue {
   }
 
   getMessage(messageId: string): QueuedMessage | undefined {
-    for (const queue of this.queues.values()) {
-      const message = queue.find((m) => m.id === messageId);
-      if (message) return message;
-    }
-    return undefined;
+    return this.messages.get(messageId);
   }
 
   getQueuePosition(messageId: string, cascadeId: string): number {
@@ -157,6 +155,7 @@ export class MessageQueue {
 
   clear(): void {
     this.queues.clear();
+    this.messages.clear();
     console.log("Queue cleared");
   }
 }
