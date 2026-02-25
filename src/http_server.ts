@@ -15,6 +15,10 @@ interface ResponseQuery {
   messageId?: string;
 }
 
+interface ModelsQuery {
+  details?: string;
+}
+
 export class HttpServer {
   private server: FastifyInstance | null = null;
   private port: number;
@@ -68,12 +72,37 @@ export class HttpServer {
       return { status: "ok" };
     });
 
-    this.server.get("/models", async (request, reply) => {
+    this.server.get<{ Querystring: ModelsQuery }>("/models", async (request, reply) => {
       try {
+        const details =
+          request.query.details === "1" ||
+          request.query.details === "true" ||
+          request.query.details === "yes";
         const models = await this.client.getModels();
-        return models
-          .filter((m) => m.modelOrAlias)
-          .map((m) => m.label);
+
+        if (!details) {
+          return models.map((m) => m.label);
+        }
+
+        return {
+          count: models.length,
+          labels: models.map((m) => m.label),
+          models: models.map((m) => ({
+            label: m.label,
+            modelUid: m.modelUid || m.modelOrAlias?.modelUid || null,
+            modelOrAlias: m.modelOrAlias || null,
+            disabled: m.disabled,
+            supportsImages: m.supportsImages,
+            supportsLegacy: m.supportsLegacy,
+            isPremium: m.isPremium,
+            isBeta: m.isBeta,
+            isRecommended: m.isRecommended,
+            pricingType: m.pricingType,
+            provider: m.provider,
+            creditMultiplier: m.creditMultiplier,
+            betaWarningMessage: m.betaWarningMessage || null,
+          })),
+        };
       } catch (error) {
         return reply.status(500).send({
           error: error instanceof Error ? error.message : String(error),

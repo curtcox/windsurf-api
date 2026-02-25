@@ -319,6 +319,27 @@ export class Client {
       },
     ];
 
+    const getModelKey = (model: ClientModelConfig): string => {
+      const directUid = model.modelUid?.trim();
+      if (directUid) {
+        return `uid:${directUid}`;
+      }
+
+      const aliasUid = model.modelOrAlias?.modelUid?.trim();
+      if (aliasUid) {
+        return `uid:${aliasUid}`;
+      }
+
+      const alias = model.modelOrAlias?.alias ?? 0;
+      const enumModel = model.modelOrAlias?.model ?? 0;
+      if (alias !== 0 || enumModel !== 0) {
+        return `enum:${enumModel}:${alias}`;
+      }
+
+      return `label:${model.label.trim().toLowerCase()}`;
+    };
+
+    const mergedModels = new Map<string, ClientModelConfig>();
     let lastError: unknown = null;
     let hadSuccessfulCall = false;
 
@@ -326,8 +347,31 @@ export class Client {
       try {
         const models = await attempt();
         hadSuccessfulCall = true;
-        if (models.length > 0) {
-          return models;
+
+        for (const model of models) {
+          const key = getModelKey(model);
+          const existing = mergedModels.get(key);
+
+          if (!existing) {
+            mergedModels.set(key, model);
+            continue;
+          }
+
+          if (!existing.modelUid && model.modelUid) {
+            existing.modelUid = model.modelUid;
+          }
+
+          if (!existing.modelOrAlias && model.modelOrAlias) {
+            existing.modelOrAlias = model.modelOrAlias;
+          }
+
+          if (!existing.label && model.label) {
+            existing.label = model.label;
+          }
+
+          if (existing.disabled && !model.disabled) {
+            existing.disabled = false;
+          }
         }
       } catch (error) {
         lastError = error;
@@ -341,7 +385,9 @@ export class Client {
       throw lastError;
     }
 
-    return [];
+    return Array.from(mergedModels.values()).sort((a, b) =>
+      a.label.localeCompare(b.label, undefined, { sensitivity: "base" })
+    );
   }
 
   async getTrajectories(): Promise<{

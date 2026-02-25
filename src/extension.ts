@@ -228,8 +228,18 @@ export function activate(context: vscode.ExtensionContext) {
   );
 }
 
-export function deactivate() {
+export async function deactivate(): Promise<void> {
+  windsurfHandler?.dispose();
+  windsurfHandler = null;
+
   if (httpServer?.isRunning()) {
-    httpServer.stop();
+    try {
+      await httpServer.stop();
+    } catch (error) {
+      console.error("Failed to stop HTTP server during deactivate:", error);
+    }
   }
+
+  httpServer = null;
+  client = null;
 }

@@ -11,6 +11,7 @@ EXTENSION_VERSION=""
 EXPECTED_NAME_LOWER=""
 EXPECTED_IDS=()
 VERIFICATION_METHOD=""
+ALLOW_RUNNING=0
 
 log() {
   printf '[INFO] %s\n' "$1"
@@ -43,6 +44,36 @@ require_command() {
 command_exists() {
   local command_name="$1"
   command -v "$command_name" >/dev/null 2>&1
+}
+
+print_usage() {
+  cat <<'EOF'
+Usage: scripts/install_extension.sh [options]
+
+Options:
+  --allow-running   Skip the Windsurf running-process preflight check.
+  -h, --help        Show this help message.
+EOF
+}
+
+parse_args() {
+  while (($# > 0)); do
+    case "$1" in
+      --allow-running)
+        ALLOW_RUNNING=1
+        shift
+        ;;
+      -h|--help)
+        print_usage
+        exit 0
+        ;;
+      *)
+        fail_with_solution \
+          "Unknown argument: $1" \
+          "Run \`scripts/install_extension.sh --help\` for supported options."
+        ;;
+    esac
+  done
 }
 
 to_lower() {
@@ -131,6 +162,38 @@ ensure_windsurf_cli_usable() {
     "Run \`windsurf --version\` manually, fix the CLI/runtime issue, then re-run this script."
 }
 
+ensure_windsurf_not_running() {
+  if [[ "$ALLOW_RUNNING" -eq 1 ]]; then
+    warn "Skipping Windsurf running-process check because --allow-running was provided."
+    return
+  fi
+
+  if ! command_exists pgrep; then
+    warn "Skipping running-process check: pgrep is unavailable on this system."
+    return
+  fi
+
+  local process_output=""
+  local process_status=0
+
+  set +e
+  process_output="$(pgrep -af "Windsurf|\\.codeium/windsurf/bin/windsurf" 2>/dev/null)"
+  process_status=$?
+  set -e
+
+  if [[ "$process_status" -eq 0 && -n "$process_output" ]]; then
+    warn "Detected Windsurf-related processes:"
+    printf '%s\n' "$process_output" >&2
+    fail_with_solution \
+      "Windsurf appears to still be running (or partially running)." \
+      "Quit Windsurf completely (Cmd+Q), wait a few seconds, then re-run this script. If needed, run \`pkill -f \"Windsurf|codeium/windsurf\"\` and retry."
+  fi
+
+  if [[ "$process_status" -gt 1 ]]; then
+    warn "Could not inspect running Windsurf processes via pgrep. Continuing."
+  fi
+}
+
 pnpm_dlx_available() {
   pnpm dlx --help >/dev/null 2>&1
 }
@@ -170,8 +233,10 @@ install_extension_with_windsurf() {
 
   if ! windsurf --install-extension "$vsix_path" --force >>"$LOG_FILE" 2>&1; then
     if has_reinstall_requires_restart_error "$LOG_FILE"; then
-      warn "Windsurf reported a restart is required before reinstalling; continuing with installed-extension verification."
-      return 0
+      print_log_tail
+      fail_with_solution \
+        "Windsurf reported that a restart is required before reinstalling the extension." \
+        "Fully quit Windsurf (including background helper processes), then re-run this script. You can use \`pkill -f \"Windsurf|codeium/windsurf\"\` if needed."
     fi
 
     print_log_tail
@@ -367,6 +432,7 @@ EOF
 
 main() {
   : >"$LOG_FILE"
+  parse_args "$@"
 
   require_command node "running package tools"
   require_command pnpm "packaging the extension"
@@ -383,6 +449,7 @@ main() {
   ensure_package_script_exists
   ensure_extension_metadata
   ensure_windsurf_cli_usable
+  ensure_windsurf_not_running
   package_extension
 
   local vsix_path

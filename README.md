@@ -127,6 +127,17 @@ curl http://localhost:47923/models
 
 Returns: `["Claude Sonnet 4.5 (promo)", "SWE-1", "GPT-5 (low reasoning)", ...]`
 
+You can also request detailed model metadata:
+
+```bash
+curl "http://localhost:47923/models?details=1"
+```
+
+Returns:
+- `count`: total number of deduped models found across model sources
+- `labels`: label-only array
+- `models`: full model metadata array (uid/alias/flags/pricing/provider)
+
 ### GET /trajectories
 List all conversations.
 
