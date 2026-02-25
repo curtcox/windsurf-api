@@ -216,6 +216,42 @@ Check if a cascade is idle or busy.
 curl http://localhost:47923/status?cascadeId=cascade-id
 ```
 
+### GET /playground
+Open a browser-based form UI that lets you choose mode/model, submit a query, and view the response.
+
+```bash
+open http://localhost:47923/playground
+```
+
+### OpenRouter-Compatible API
+
+#### GET /api/v1/models
+Returns model metadata in an OpenRouter/OpenAI-style `list` shape.
+
+```bash
+curl http://localhost:47923/api/v1/models
+```
+
+#### POST /api/v1/chat/completions
+OpenRouter-style chat completions endpoint (non-streaming).
+
+```bash
+curl -X POST http://localhost:47923/api/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "windsurf/swe-1-5",
+    "mode": "read-only",
+    "messages": [
+      { "role": "user", "content": "Explain this codebase in 5 bullets." }
+    ]
+  }'
+```
+
+Notes:
+- `stream: true` is not supported by this local endpoint.
+- `mode` is a local extension (`default`, `read-only`, `no-tool`, `explore`, `planning`, `auto`).
+- `model` accepts either model label (for example `"SWE-1.5"`) or OpenRouter-style id from `/api/v1/models`.
+
 ## CLI Query Script
 
 Submit a prompt and wait for the final response:
