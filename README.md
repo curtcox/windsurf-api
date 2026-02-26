@@ -1,69 +1,9 @@
 # Disclaimer
 
-I am not affiliated with Codeium or Windsurf. I am not responsible for any damage or loss of data that may occur from using this extension. It may stop working at any time, as it's based on decompiled protos and guessed logic. If you are a Windsurf developer, I dare you: please consider adding an API to your wonderful IDE. That would benefit a lot of your users - just imagine being able to send prompts with context directly from Figma or Chrome DevTools without needing to copy-paste large texts.
-
-# How it works
-
-## Problem 1: Getting the server port and credentials
-
-Windsurf uses a random port for its gRPC server. The port is managed by (I think) a modified part of the VSCode core. But the chat panel is actually a built-in extension, so how the fuck does it know where to connect?
-
-Simple: after server initialization and user account retrieval, Windsurf executes a command (`windsurf.initializeCascade`) with parameters including the port and nonce.
-
-The command execution mechanism is the only public API of any extension. Every extension in VSCode has two isolated parts: host process and renderer. Like in Electron, but we don't actually have control over the renderer process - we can only ask VSCode to spawn an iframe for us. The problem is that iframes are also isolated, and you cannot just go to some other iframe and execute scripts in its context.
-
-**The solution:** VSCode docs won't tell you this, but you can override handlers for any other extension. The only thing that matters is the order of loading, and thanks god Windsurf extension loads first.
-
-```typescript
-const windsurfHandler = vscode.commands.registerCommand(
-  "windsurf.initializeCascade",
-  async (...args) => {
-    const params = JSON.parse(atob(args[0]));
-    console.log(params);
-  }
-);
-```
-
-This simple trick gives you the port, server API key, and metadata. But it breaks Windsurf's extension. So how do we call the original handler?
-
-There's no direct way to get a callback for a registered command, but if we dispose our handler and re-execute the command, it gets passed to the original handler. For some reason VSCode doesn't replace it completely - it just pushes our handler to the top of the stack.
-
-```typescript
-const windsurfHandler = vscode.commands.registerCommand(
-  "windsurf.initializeCascade",
-  async (...args) => {
-    const params = JSON.parse(atob(args[0]));
-
-    client = new Client(params);
-    console.log("Windsurf initialized");
-
-    windsurfHandler.dispose();
-    setTimeout(() => {
-      vscode.commands.executeCommand("windsurf.initializeCascade", ...args);
-    });
-  }
-);
-```
-
-This allows both our extension and Windsurf to work.
-
-## Problem 2: Decompiling the gRPC protos
-
-Windsurf uses gRPC for communication with its server, and it's not a public API. We need to get the protos. Thankfully JS is fucking stupid and straightforward - having a compiled gRPC client, we can do some magic (described in [./decompile/DECOMPILE.md](./decompile/DECOMPILE.md)) and get the source protos back, just to compile them back to TypeScript. Fucking cycle of nonsense.
-
-**Update:** Improved the decompiler to recover full gRPC service definitions with proper streaming annotations. This makes adding new API features way easier - just look at the proto, call the RPC method through the generated client.
-
-## Problem 3: Understanding the protocol
-
-With ports and protos, we can finally send messages to the server. Go to the network tab, observe what workbench.desktop.main.js sends, decode protobufs to get an idea of what to send and where. Write a client and that's it.
-
-Wrap that shit in a REST server with proper queueing (Windsurf does this UI-side instead of at gRPC level), and now you can:
-- Start new conversations
-- Continue existing conversations by cascadeId
-- List available models and select which one to use
-- Send messages without blocking - queue handles cascade status automatically
-
-The queue system is per-cascade, so multiple conversations can process concurrently. If a cascade is idle, messages send immediately. If busy, they queue and wait.
+All of the actual work was done in the upstream repo this one was forked from.
+See that repo for information on how it works.
+This repo just has some additional features and documentation.
+I am not affiliated with Codeium, Windsurf, Exafunction, or Major League Baseball.
 
 # Usage
 
@@ -223,6 +163,8 @@ Open a browser-based form UI that lets you choose mode/model, submit a query, an
 open http://localhost:47923/playground
 ```
 
+![API Playground](screenshots/API_Playground.png)
+
 ### OpenRouter-Compatible API
 
 #### GET /api/v1/models
@@ -319,37 +261,17 @@ pnpm run package
 
 The GitHub Actions workflow automatically builds and releases the extension on git tags (e.g., `v0.0.2`).
 
-## Related Work
+## MCP Server
 
-### Using windsurf-api
+This repository includes a standalone MCP server that exposes the Windsurf HTTP API as MCP tools and resources. It supports `stdio` and `sse` transports.
 
-If you're building with this code or learned from it, let us know! We'd love to hear about your project.
+See [mcp_server.md](mcp_server.md) for full details on setup, usage, tools, resources, and validation.
 
-### Other Implementations and References
-
-I've kept an eye out for other implementations and references to the core APIs,
-I typically find them by searching for the protobuf method names in GitHub/elsewhere like *this*:
-
-- [Github Search: /exa.cortex_pb.SendChatMessage/](https://github.com/search?q=%2Fexa.cortex_pb.SendChatMessage%2F&type=code) - Github search for SendChatMessage method
-- [Github Search: /exa.cortex_pb.ArenaModeInfo/](https://github.com/search?q=%2Fexa.cortex_pb.ArenaModeInfo%2F&type=code) - Github search for recently added APIs
-
-#### What I've found
-
-- [mobb-dev/bugsy: .../CortexTrajectory.ts](https://github.com/mobb-dev/bugsy/blob/66f57d0ad74ed947f90481aedb5e2a3b24a14c03/src/features/codeium_intellij/proto/exa/cortex_pb/CortexTrajectory.ts#L11) - Contains ArenaModeInfo, recent additions to the API
-- [IronBit-0/cpwn:.../antigravity_auto/universal_proxy_docs/patch_extension.py](https://github.com/IronBit-0/cpwn/blob/88b1a381ee8b928daa334bfc938bc6cd4550da65/website/antigravity_auto/universal_proxy_docs/patch_extension.py#L34) - A fun reminder that google anti-gravity is a *windsurf* fork which itself is a *vscode* fork 🤣
-- [rsvedant/opencode-windsurf-auth](https://github.com/rsvedant/opencode-windsurf-auth) - Also reverse engineering the Winsdurf API, building opencode.ai plugin
-- [vishnu09bharath/ai-usage-limit-monitor](https://github.com/vishnu09bharath/ai-usage-limit-monitor/blob/main/scripts/antigravity_ls_probe.py) - MacOS Menu Bar app that monitors AI usage for various services including Antigravity
-- [yuxinle1996/windsurf-grpc](https://github.com/yuxinle1996/windsurf-grpc/blob/master/script/proto-reverse-engineer.js) - Proto reverse engineering scripts, and various forks ( like  [windsurf-account-manager](https://github.com/surdring/windsurf-account-manager))
-
-If you've built something with these protos or figured out more of the API, feel free to open a PR.
+![MCP Inspector](screenshots/MCP_Inspector.png)
 
 ---
 
-## Contributors
-
-Made with ❤️ by:
+## Real Upstream Authors
 
 - **[@AlexStrNik](https://github.com/AlexStrNik)** - Original author and creator
 - **[@dfallon](https://github.com/dfallon)** - Maintainer and ongoing development
-
-Special thanks to all contributors who help keep this project alive!
