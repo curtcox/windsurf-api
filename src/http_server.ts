@@ -84,11 +84,15 @@ function sanitizeForLog(value: unknown, depth: number = 0): unknown {
   return output;
 }
 
+function getRepoRootLogDirPath(): string {
+  return path.resolve(__dirname, "..", "logs");
+}
+
 class ExchangeLogger {
   readonly logFilePath: string;
 
   constructor(prefix: string) {
-    const dirPath = path.resolve(process.cwd(), "logs");
+    const dirPath = getRepoRootLogDirPath();
     mkdirSync(dirPath, { recursive: true });
     this.logFilePath = path.join(dirPath, `${prefix}-${getTimestampForFile()}.log`);
     this.log("system", "logger_initialized", { logFile: this.logFilePath });

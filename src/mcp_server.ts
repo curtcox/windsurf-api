@@ -125,11 +125,15 @@ function sanitizeForLog(value: unknown, depth: number = 0): unknown {
   return output;
 }
 
+function getRepoRootLogDirPath(): string {
+  return path.resolve(__dirname, "..", "logs");
+}
+
 class ExchangeLogger {
   readonly logFilePath: string;
 
   constructor() {
-    const dirPath = path.resolve(process.cwd(), "logs");
+    const dirPath = getRepoRootLogDirPath();
     mkdirSync(dirPath, { recursive: true });
     const filename = `mcp-exchanges-${getTimestampForFile()}.log`;
     this.logFilePath = path.join(dirPath, filename);
