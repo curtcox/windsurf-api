@@ -49,6 +49,7 @@
     "vscode:prepublish": "pnpm run bundle",
     "compile": "tsc -p ./",
     "bundle": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node",
+    "build:mcp": "esbuild src/mcp_server.ts --bundle --outfile=out/mcp-server.js --format=cjs --platform=node",
     "watch": "tsc -watch -p ./",
     "decompile:extract": "node decompile/extract_sources.js",
     "decompile:prepare": "node decompile/prepare_decompile.js",
@@ -57,6 +58,9 @@
     "lint": "eslint src",
     "test": "vscode-test",
     "package": "vsce package --no-dependencies"
+  },
+  "bin": {
+    "windsurf-mcp": "./out/mcp-server.js"
   },
   "devDependencies": {
     "@bufbuild/buf": "^1.55.1",
@@ -74,10 +78,12 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
     "@bufbuild/protobuf": "^2.9.0",
     "@connectrpc/connect": "^2.1.0",
     "@connectrpc/connect-web": "^2.1.0",
     "fastify": "^5.2.2",
-    "file-type": "^21.0.0"
+    "file-type": "^21.0.0",
+    "zod": "^3.25.76"
   }
 }
