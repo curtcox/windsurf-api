@@ -1,4 +1,6 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { appendFileSync, mkdirSync } from "node:fs";
+import path from "node:path";
 import { URL } from "node:url";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -79,20 +81,102 @@ type QueueMessage = {
   responseUrl?: string;
 };
 
+function getTimestampForFile(date: Date = new Date()): string {
+  const yyyy = date.getUTCFullYear();
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(date.getUTCDate()).padStart(2, "0");
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const mi = String(date.getUTCMinutes()).padStart(2, "0");
+  const ss = String(date.getUTCSeconds()).padStart(2, "0");
+  return `${yyyy}${mm}${dd}-${hh}${mi}${ss}Z`;
+}
+
+function sanitizeForLog(value: unknown, depth: number = 0): unknown {
+  if (depth > 8) {
+    return "[MaxDepth]";
+  }
+
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return value.length > 4000 ? `${value.slice(0, 4000)}...[truncated]` : value;
+  }
+
+  if (typeof value !== "object") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeForLog(item, depth + 1));
+  }
+
+  const input = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(input)) {
+    if (key.toLowerCase().includes("base64")) {
+      const size = typeof raw === "string" ? raw.length : 0;
+      output[key] = `[redacted base64 ${size} chars]`;
+      continue;
+    }
+    output[key] = sanitizeForLog(raw, depth + 1);
+  }
+  return output;
+}
+
+class ExchangeLogger {
+  readonly logFilePath: string;
+
+  constructor() {
+    const dirPath = path.resolve(process.cwd(), "logs");
+    mkdirSync(dirPath, { recursive: true });
+    const filename = `mcp-exchanges-${getTimestampForFile()}.log`;
+    this.logFilePath = path.join(dirPath, filename);
+    this.log("system", "logger_initialized", { logFile: this.logFilePath });
+  }
+
+  log(channel: string, event: string, payload?: unknown): void {
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      channel,
+      event,
+      payload: sanitizeForLog(payload),
+    });
+    appendFileSync(this.logFilePath, `${line}\n`, "utf8");
+  }
+}
+
 class WindsurfHttpClient {
   private baseUrl: string;
+  private logger: ExchangeLogger;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, logger: ExchangeLogger) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.logger = logger;
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
+    const method = init?.method || "GET";
+    const requestBody =
+      typeof init?.body === "string" ? tryParseJson(init.body) ?? init.body : undefined;
+    this.logger.log("http", "request", {
+      method,
+      url: `${this.baseUrl}${path}`,
+      body: requestBody,
+    });
+
     let response: Response;
 
     try {
       response = await fetch(`${this.baseUrl}${path}`, init);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      this.logger.log("http", "network_error", {
+        method,
+        url: `${this.baseUrl}${path}`,
+        error: message,
+      });
       throw new Error(
         `Windsurf HTTP API is not reachable at ${this.baseUrl}. Ensure the Windsurf extension is running with the HTTP server started. (${message})`
       );
@@ -100,6 +184,12 @@ class WindsurfHttpClient {
 
     const text = await response.text();
     const json = text ? tryParseJson(text) : null;
+    this.logger.log("http", "response", {
+      method,
+      url: `${this.baseUrl}${path}`,
+      status: response.status,
+      body: json ?? text,
+    });
 
     if (!response.ok) {
       const errorMessage = extractErrorMessage(json) || text || `HTTP ${response.status}`;
@@ -242,7 +332,7 @@ async function awaitPromptResponse(
   throw new Error("Timed out waiting for Windsurf response after 300 seconds.");
 }
 
-function createMcpServer(client: WindsurfHttpClient): McpServer {
+function createMcpServer(client: WindsurfHttpClient, logger: ExchangeLogger): McpServer {
   const server = new McpServer({
     name: "windsurf-api",
     version: "0.0.2",
@@ -265,6 +355,11 @@ function createMcpServer(client: WindsurfHttpClient): McpServer {
       },
     },
     async ({ text, images, model, mode, cascadeId, wait }) => {
+      logger.log("mcp", "tool_request", {
+        name: "windsurf_prompt",
+        args: { text, images, model, mode, cascadeId, wait },
+      });
+
       try {
         const queued = await client.prompt({
           text,
@@ -276,17 +371,23 @@ function createMcpServer(client: WindsurfHttpClient): McpServer {
 
         const shouldWait = wait !== false;
         if (!shouldWait) {
-          return jsonContent(queued);
+          const result = jsonContent(queued);
+          logger.log("mcp", "tool_response", { name: "windsurf_prompt", result });
+          return result;
         }
 
         const response = await awaitPromptResponse(client, queued.cascadeId, queued.messageId);
-        return jsonContent({
+        const result = jsonContent({
           queued,
           response,
           responseText: response.response,
         });
+        logger.log("mcp", "tool_response", { name: "windsurf_prompt", result });
+        return result;
       } catch (error) {
-        return toolError(error);
+        const result = toolError(error);
+        logger.log("mcp", "tool_error", { name: "windsurf_prompt", result });
+        return result;
       }
     }
   );
@@ -318,11 +419,20 @@ function createMcpServer(client: WindsurfHttpClient): McpServer {
       },
     },
     async ({ messages, model, mode }) => {
+      logger.log("mcp", "tool_request", {
+        name: "windsurf_chat_completion",
+        args: { messages, model, mode },
+      });
+
       try {
         const completion = await client.chatCompletion({ messages, model, mode });
-        return jsonContent(completion);
+        const result = jsonContent(completion);
+        logger.log("mcp", "tool_response", { name: "windsurf_chat_completion", result });
+        return result;
       } catch (error) {
-        return toolError(error);
+        const result = toolError(error);
+        logger.log("mcp", "tool_error", { name: "windsurf_chat_completion", result });
+        return result;
       }
     }
   );
@@ -338,15 +448,26 @@ function createMcpServer(client: WindsurfHttpClient): McpServer {
       },
     },
     async ({ cascadeId, messageId }) => {
+      logger.log("mcp", "tool_request", {
+        name: "windsurf_get_response",
+        args: { cascadeId, messageId },
+      });
+
       if (!cascadeId && !messageId) {
-        return toolError("Either cascadeId or messageId is required.");
+        const result = toolError("Either cascadeId or messageId is required.");
+        logger.log("mcp", "tool_error", { name: "windsurf_get_response", result });
+        return result;
       }
 
       try {
         const response = await client.getResponse(cascadeId, messageId);
-        return jsonContent(response);
+        const result = jsonContent(response);
+        logger.log("mcp", "tool_response", { name: "windsurf_get_response", result });
+        return result;
       } catch (error) {
-        return toolError(error);
+        const result = toolError(error);
+        logger.log("mcp", "tool_error", { name: "windsurf_get_response", result });
+        return result;
       }
     }
   );
@@ -361,11 +482,20 @@ function createMcpServer(client: WindsurfHttpClient): McpServer {
       },
     },
     async ({ cascadeId }) => {
+      logger.log("mcp", "tool_request", {
+        name: "windsurf_get_status",
+        args: { cascadeId },
+      });
+
       try {
         const status = await client.getStatus(cascadeId);
-        return jsonContent(status);
+        const result = jsonContent(status);
+        logger.log("mcp", "tool_response", { name: "windsurf_get_status", result });
+        return result;
       } catch (error) {
-        return toolError(error);
+        const result = toolError(error);
+        logger.log("mcp", "tool_error", { name: "windsurf_get_status", result });
+        return result;
       }
     }
   );
@@ -379,10 +509,13 @@ function createMcpServer(client: WindsurfHttpClient): McpServer {
       mimeType: "application/json",
     },
     async (uri) => {
+      logger.log("mcp", "resource_request", { name: "windsurf_health", uri: uri.href });
       const data = await client.health();
-      return {
+      const result = {
         contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(data, null, 2) }],
       };
+      logger.log("mcp", "resource_response", { name: "windsurf_health", result });
+      return result;
     }
   );
 
@@ -395,10 +528,13 @@ function createMcpServer(client: WindsurfHttpClient): McpServer {
       mimeType: "application/json",
     },
     async (uri) => {
+      logger.log("mcp", "resource_request", { name: "windsurf_models", uri: uri.href });
       const data = await client.getModels(false);
-      return {
+      const result = {
         contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(data, null, 2) }],
       };
+      logger.log("mcp", "resource_response", { name: "windsurf_models", result });
+      return result;
     }
   );
 
@@ -411,10 +547,13 @@ function createMcpServer(client: WindsurfHttpClient): McpServer {
       mimeType: "application/json",
     },
     async (uri) => {
+      logger.log("mcp", "resource_request", { name: "windsurf_models_details", uri: uri.href });
       const data = await client.getModels(true);
-      return {
+      const result = {
         contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(data, null, 2) }],
       };
+      logger.log("mcp", "resource_response", { name: "windsurf_models_details", result });
+      return result;
     }
   );
 
@@ -427,10 +566,13 @@ function createMcpServer(client: WindsurfHttpClient): McpServer {
       mimeType: "application/json",
     },
     async (uri) => {
+      logger.log("mcp", "resource_request", { name: "windsurf_trajectories", uri: uri.href });
       const data = await client.getTrajectories();
-      return {
+      const result = {
         contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(data, null, 2) }],
       };
+      logger.log("mcp", "resource_response", { name: "windsurf_trajectories", result });
+      return result;
     }
   );
 
@@ -443,10 +585,13 @@ function createMcpServer(client: WindsurfHttpClient): McpServer {
       mimeType: "application/json",
     },
     async (uri) => {
+      logger.log("mcp", "resource_request", { name: "windsurf_queue", uri: uri.href });
       const data = await client.getQueue();
-      return {
+      const result = {
         contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(data, null, 2) }],
       };
+      logger.log("mcp", "resource_response", { name: "windsurf_queue", result });
+      return result;
     }
   );
 
@@ -459,10 +604,18 @@ function createMcpServer(client: WindsurfHttpClient): McpServer {
       mimeType: "application/json",
     },
     async (uri, { messageId }) => {
-      const data = await client.getQueueMessage(messageId);
-      return {
+      const messageIdValue = Array.isArray(messageId) ? messageId[0] : messageId;
+      logger.log("mcp", "resource_request", {
+        name: "windsurf_queue_message",
+        uri: uri.href,
+        args: { messageId: messageIdValue },
+      });
+      const data = await client.getQueueMessage(messageIdValue);
+      const result = {
         contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(data, null, 2) }],
       };
+      logger.log("mcp", "resource_response", { name: "windsurf_queue_message", result });
+      return result;
     }
   );
 
@@ -529,21 +682,28 @@ function printUsage(): void {
   console.error("Usage: node out/mcp-server.js [--url <http-url>] [--transport stdio|sse] [--port <port>]");
 }
 
-async function startSseServer(server: McpServer, port: number): Promise<void> {
+async function startSseServer(server: McpServer, logger: ExchangeLogger, port: number): Promise<void> {
   const transports = new Map<string, SSEServerTransport>();
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const method = req.method || "GET";
       const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+      logger.log("sse_http", "request", {
+        method,
+        path: url.pathname,
+        query: Object.fromEntries(url.searchParams.entries()),
+      });
 
       if (method === "GET" && url.pathname === "/sse") {
         const transport = new SSEServerTransport("/messages", res);
         transports.set(transport.sessionId, transport);
         res.on("close", () => {
+          logger.log("sse_http", "session_closed", { sessionId: transport.sessionId });
           transports.delete(transport.sessionId);
         });
         await server.connect(transport);
+        logger.log("sse_http", "session_opened", { sessionId: transport.sessionId });
         return;
       }
 
@@ -552,6 +712,12 @@ async function startSseServer(server: McpServer, port: number): Promise<void> {
         if (!sessionId) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "sessionId is required" }));
+          logger.log("sse_http", "response", {
+            method,
+            path: url.pathname,
+            status: 400,
+            error: "sessionId is required",
+          });
           return;
         }
 
@@ -559,19 +725,42 @@ async function startSseServer(server: McpServer, port: number): Promise<void> {
         if (!transport) {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Unknown sessionId" }));
+          logger.log("sse_http", "response", {
+            method,
+            path: url.pathname,
+            status: 404,
+            error: "Unknown sessionId",
+            sessionId,
+          });
           return;
         }
 
         await transport.handlePostMessage(req, res);
+        logger.log("sse_http", "response", {
+          method,
+          path: url.pathname,
+          status: 200,
+          sessionId,
+        });
         return;
       }
 
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Not found" }));
+      logger.log("sse_http", "response", {
+        method,
+        path: url.pathname,
+        status: 404,
+        error: "Not found",
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: message }));
+      logger.log("sse_http", "response", {
+        status: 500,
+        error: message,
+      });
     }
   });
 
@@ -586,16 +775,19 @@ async function startSseServer(server: McpServer, port: number): Promise<void> {
 
 async function main(): Promise<void> {
   const { baseUrl, transport, port } = parseCliArgs(process.argv.slice(2));
-  const client = new WindsurfHttpClient(baseUrl);
-  const server = createMcpServer(client);
+  const logger = new ExchangeLogger();
+  logger.log("system", "server_start", { baseUrl, transport, port });
+  const client = new WindsurfHttpClient(baseUrl, logger);
+  const server = createMcpServer(client, logger);
 
   if (transport === "stdio") {
     const stdio = new StdioServerTransport();
     await server.connect(stdio);
+    logger.log("system", "stdio_connected");
     return;
   }
 
-  await startSseServer(server, port);
+  await startSseServer(server, logger, port);
 }
 
 void main().catch((error) => {

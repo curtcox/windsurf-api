@@ -1,4 +1,6 @@
 import Fastify, { FastifyInstance } from "fastify";
+import { appendFileSync, mkdirSync } from "node:fs";
+import path from "node:path";
 import { Client } from "./client";
 import { MessageQueue } from "./queue";
 
@@ -37,14 +39,82 @@ interface OpenRouterChatCompletionRequest {
   max_tokens?: number;
 }
 
+function getTimestampForFile(date: Date = new Date()): string {
+  const yyyy = date.getUTCFullYear();
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(date.getUTCDate()).padStart(2, "0");
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const mi = String(date.getUTCMinutes()).padStart(2, "0");
+  const ss = String(date.getUTCSeconds()).padStart(2, "0");
+  return `${yyyy}${mm}${dd}-${hh}${mi}${ss}Z`;
+}
+
+function sanitizeForLog(value: unknown, depth: number = 0): unknown {
+  if (depth > 8) {
+    return "[MaxDepth]";
+  }
+
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return value.length > 4000 ? `${value.slice(0, 4000)}...[truncated]` : value;
+  }
+
+  if (typeof value !== "object") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeForLog(item, depth + 1));
+  }
+
+  const input = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(input)) {
+    if (key.toLowerCase().includes("base64")) {
+      const size = typeof raw === "string" ? raw.length : 0;
+      output[key] = `[redacted base64 ${size} chars]`;
+      continue;
+    }
+    output[key] = sanitizeForLog(raw, depth + 1);
+  }
+
+  return output;
+}
+
+class ExchangeLogger {
+  readonly logFilePath: string;
+
+  constructor(prefix: string) {
+    const dirPath = path.resolve(process.cwd(), "logs");
+    mkdirSync(dirPath, { recursive: true });
+    this.logFilePath = path.join(dirPath, `${prefix}-${getTimestampForFile()}.log`);
+    this.log("system", "logger_initialized", { logFile: this.logFilePath });
+  }
+
+  log(channel: string, event: string, payload?: unknown): void {
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      channel,
+      event,
+      payload: sanitizeForLog(payload),
+    });
+    appendFileSync(this.logFilePath, `${line}\n`, "utf8");
+  }
+}
+
 export class HttpServer {
   private server: FastifyInstance | null = null;
   private port: number;
   private queue: MessageQueue;
+  private logger: ExchangeLogger;
 
   constructor(private client: Client, port: number = 47923) {
     this.port = port;
     this.queue = new MessageQueue(client);
+    this.logger = new ExchangeLogger("http-exchanges");
   }
 
   private toOpenRouterModelId(label: string): string {
@@ -438,6 +508,7 @@ export class HttpServer {
     }
 
     this.server = Fastify({ logger: false });
+    this.logger.log("system", "server_starting", { port: this.port });
 
     this.server.addHook("onRequest", async (request, reply) => {
       reply.header("Access-Control-Allow-Origin", "*");
@@ -450,6 +521,38 @@ export class HttpServer {
       if (request.method === "OPTIONS") {
         reply.status(200).send();
       }
+    });
+
+    this.server.addHook("preHandler", async (request) => {
+      this.logger.log("http_server", "request", {
+        requestId: request.id,
+        method: request.method,
+        url: request.url,
+        query: request.query,
+        body: request.body,
+      });
+    });
+
+    this.server.addHook("onSend", async (request, reply, payload) => {
+      const parsedPayload =
+        typeof payload === "string"
+          ? (() => {
+              try {
+                return JSON.parse(payload);
+              } catch {
+                return payload;
+              }
+            })()
+          : payload;
+
+      this.logger.log("http_server", "response", {
+        requestId: request.id,
+        method: request.method,
+        url: request.url,
+        statusCode: reply.statusCode,
+        payload: parsedPayload,
+      });
+      return payload;
     });
 
     this.server.get("/", async (request, reply) => {
@@ -818,6 +921,7 @@ export class HttpServer {
 
     await this.server.listen({ port: this.port, host: "0.0.0.0" });
     console.log(`HTTP server listening on port ${this.port}`);
+    this.logger.log("system", "server_listening", { port: this.port });
 
     this.queue.startWorker();
   }
@@ -828,6 +932,7 @@ export class HttpServer {
       await this.server.close();
       this.server = null;
       console.log("HTTP server stopped");
+      this.logger.log("system", "server_stopped");
     }
   }
 

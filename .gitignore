@@ -5,3 +5,4 @@ node_modules
 *.vsix
 src/gen
 .DS_Store
+logs/*.log
